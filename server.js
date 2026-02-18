@@ -4,9 +4,17 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
+require('dotenv').config();
+
+// Debug environment variables
+console.log('🔍 Environment Variables Debug:');
+console.log('STRIPE_SECRET_KEY present:', !!process.env.STRIPE_SECRET_KEY);
+console.log('STRIPE_SECRET_KEY length:', process.env.STRIPE_SECRET_KEY ? process.env.STRIPE_SECRET_KEY.length : 0);
+console.log('RESEND_API_KEY present:', !!process.env.RESEND_API_KEY);
+console.log('DATABASE_URL present:', !!process.env.DATABASE_URL);
+
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { Resend } = require('resend');
-require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -23,7 +31,21 @@ const pool = new Pool({
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: function(origin, callback) {
+    const allowedOrigins = [
+      process.env.FRONTEND_URL,
+      'https://www.strandly.shop',
+      'https://strandly.shop',
+      'https://strandly-hair-analysis.netlify.app',
+      'http://localhost:3000'
+    ].filter(Boolean);
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
   credentials: true
 }));
 app.use(morgan('combined'));
@@ -76,12 +98,29 @@ app.post('/api/quiz/submit', async (req, res) => {
   }
 });
 
-// PAYMENT ENDPOINTS - Simplified like Tressence (WORKING VERSION)
+// PAYMENT ENDPOINTS - With Mock Mode for Development
 app.post('/api/payment/create-checkout', async (req, res) => {
   try {
     const { quizId } = req.body;
     
     console.log('Creating payment session for quizId:', quizId);
+    console.log('Mock payments enabled:', !!process.env.MOCK_PAYMENTS);
+    
+    // Mock payment mode for development/testing
+    if (process.env.MOCK_PAYMENTS === 'true') {
+      const mockSessionId = 'cs_mock_' + Date.now();
+      const mockUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/success.html?session_id=${mockSessionId}&quiz_id=${quizId}&mock=true`;
+      
+      console.log('🧪 Mock payment session created:', mockSessionId);
+      
+      return res.json({ 
+        sessionId: mockSessionId,
+        url: mockUrl,
+        mock: true
+      });
+    }
+    
+    // Real Stripe payment mode
     console.log('Stripe API key available:', !!process.env.STRIPE_SECRET_KEY);
     console.log('Frontend URL:', process.env.FRONTEND_URL);
     
@@ -99,8 +138,8 @@ app.post('/api/payment/create-checkout', async (req, res) => {
         quantity: 1,
       }],
       mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL || 'https://strandly-hair-analysis.netlify.app'}/success?session_id={CHECKOUT_SESSION_ID}&quiz_id=${quizId}`,
-      cancel_url: `${process.env.FRONTEND_URL || 'https://strandly-hair-analysis.netlify.app'}/quiz`,
+      success_url: `${process.env.FRONTEND_URL || 'https://www.strandly.shop'}/success.html?session_id={CHECKOUT_SESSION_ID}&quiz_id=${quizId}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'https://www.strandly.shop'}/quiz.html`,
       metadata: {
         quizId: quizId
       }
@@ -123,13 +162,28 @@ app.post('/api/payment/create-checkout', async (req, res) => {
   }
 });
 
-// Payment Intent - Simplified version
+// Payment Intent - With Mock Mode Support
 app.post('/api/payment/create-intent', async (req, res) => {
   try {
     const { quizId, amount = 2900, currency = 'usd' } = req.body;
     
     console.log('Creating payment intent for quizId:', quizId);
     
+    // Mock payment mode
+    if (process.env.MOCK_PAYMENTS === 'true') {
+      const mockClientSecret = 'pi_mock_' + Date.now() + '_secret_mock';
+      const mockPaymentIntentId = 'pi_mock_' + Date.now();
+      
+      console.log('🧪 Mock payment intent created:', mockPaymentIntentId);
+      
+      return res.json({ 
+        clientSecret: mockClientSecret,
+        paymentIntentId: mockPaymentIntentId,
+        mock: true
+      });
+    }
+    
+    // Real Stripe payment intent
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amount, // $29.00 in cents
       currency: currency,
