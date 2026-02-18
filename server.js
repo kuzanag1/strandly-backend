@@ -107,6 +107,41 @@ app.post('/api/payment/create-checkout', async (req, res) => {
   }
 });
 
+// NEW: Create Payment Intent for Stripe Elements
+app.post('/api/payment/create-intent', async (req, res) => {
+  try {
+    const { quizId, amount = 2900, currency = 'usd' } = req.body;
+    
+    if (!quizId) {
+      return res.status(400).json({ error: 'Quiz ID is required' });
+    }
+    
+    // Verify quiz exists
+    const quizResult = await pool.query('SELECT id FROM quiz_submissions WHERE id = $1', [quizId]);
+    if (quizResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Quiz not found' });
+    }
+    
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amount, // $29.00 in cents
+      currency: currency,
+      metadata: {
+        quizId: quizId,
+        service: 'hair_analysis'
+      },
+      description: 'Professional Hair Analysis - Strandly'
+    });
+
+    res.json({ 
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id
+    });
+  } catch (error) {
+    console.error('Payment intent creation error:', error);
+    res.status(500).json({ error: 'Failed to create payment intent' });
+  }
+});
+
 app.post('/api/payment/webhook', express.raw({type: 'application/json'}), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -126,6 +161,22 @@ app.post('/api/payment/webhook', express.raw({type: 'application/json'}), async 
     await pool.query(
       'UPDATE quiz_submissions SET payment_status = $1, stripe_session_id = $2 WHERE id = $3',
       ['completed', session.id, quizId]
+    );
+    
+    // Trigger hair analysis and email sending
+    await processHairAnalysis(quizId);
+  }
+
+  if (event.type === 'payment_intent.succeeded') {
+    const paymentIntent = event.data.object;
+    const quizId = paymentIntent.metadata.quizId;
+    
+    console.log('💳 Payment intent succeeded:', paymentIntent.id, 'for quiz:', quizId);
+    
+    // Mark payment as completed and trigger analysis
+    await pool.query(
+      'UPDATE quiz_submissions SET payment_status = $1, stripe_payment_intent_id = $2, updated_at = NOW() WHERE id = $3',
+      ['completed', paymentIntent.id, quizId]
     );
     
     // Trigger hair analysis and email sending
@@ -336,11 +387,18 @@ async function initializeDatabase() {
         data JSONB NOT NULL,
         payment_status VARCHAR(50) DEFAULT 'pending',
         stripe_session_id VARCHAR(255),
+        stripe_payment_intent_id VARCHAR(255),
         analysis_results JSONB,
         status VARCHAR(50) DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       )
+    `);
+
+    // Add column if it doesn't exist (for existing databases)
+    await pool.query(`
+      ALTER TABLE quiz_submissions 
+      ADD COLUMN IF NOT EXISTS stripe_payment_intent_id VARCHAR(255)
     `);
     
     console.log('Database tables initialized successfully');
